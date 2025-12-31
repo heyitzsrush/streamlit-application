@@ -1,267 +1,218 @@
-# app_cifar.py
-# A simple Streamlit app to demonstrate a CNN on CIFAR-10 (built-in Keras dataset).
-# It shows: training logs, history plots, test evaluation, and lets you select random test images to predict.
+# app_opencv.py
+# Streamlit + OpenCV demo app:
+# ✅ Upload image
+# ✅ Resize
+# ✅ Rotate
+# ✅ Annotate (text + rectangle)
+# ✅ Canny edge detection
+# ✅ Face detection (Haar Cascade)
 
 import streamlit as st
 import numpy as np
-import tensorflow as tf
-import matplotlib.pyplot as plt
-import pandas as pd
+import cv2
 
-st.set_page_config(page_title="Simple CNN Demo (CIFAR-10)", layout="wide")
-st.title("🧠 Simple CNN Demo (CIFAR-10)")
+st.set_page_config(page_title="OpenCV Playground", layout="wide")
+st.title("🖼️ OpenCV Playground (Resize • Rotate • Annotate • Canny • Face Detect)")
+
 st.write(
-    "This app trains a small CNN on **CIFAR-10** (32×32 color images, 10 classes) and lets you test predictions."
+    "Upload an image and try classic OpenCV operations.\n\n"
+    "**Tip:** Face detection works best on clear front-facing faces."
 )
 
-# -----------------------------
+# -------------------------
+# Helpers
+# -------------------------
+def read_image_as_bgr(uploaded_file):
+    """Read uploaded image bytes -> OpenCV BGR image."""
+    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+    bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    return bgr
+
+def bgr_to_rgb(bgr):
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+def clamp_int(x, lo, hi):
+    return int(max(lo, min(hi, x)))
+
+# -------------------------
 # Sidebar controls
-# -----------------------------
-st.sidebar.header("Training Settings")
-epochs = st.sidebar.slider("Epochs", 1, 15, 5)
-batch_size = st.sidebar.selectbox("Batch size", [32, 64, 128], index=1)
-learning_rate = st.sidebar.selectbox("Learning rate", [1e-4, 5e-4, 1e-3, 2e-3], index=2)
-
-use_small_subset = st.sidebar.checkbox("Use small subset (faster demo)", value=True)
-subset_train = st.sidebar.slider("Train subset size", 2000, 50000, 10000, 1000, disabled=not use_small_subset)
-subset_test = st.sidebar.slider("Test subset size", 500, 10000, 2000, 500, disabled=not use_small_subset)
-
-dropout = st.sidebar.slider("Dropout", 0.0, 0.6, 0.25, 0.05)
-seed = st.sidebar.number_input("Random seed", 0, 999999, 42, 1)
+# -------------------------
+st.sidebar.header("1) Upload")
+uploaded = st.sidebar.file_uploader("Upload an image", type=["png", "jpg", "jpeg", "bmp", "webp"])
 
 st.sidebar.markdown("---")
-st.sidebar.header("Prediction Settings")
-num_random_images = st.sidebar.slider("How many random test images to show", 6, 20, 12, 1)
+st.sidebar.header("2) Resize")
+resize_on = st.sidebar.checkbox("Enable resize", value=True)
+resize_mode = st.sidebar.selectbox("Resize mode", ["Scale (%)", "Exact (W,H)"], index=0)
 
-# -----------------------------
-# Class names for CIFAR-10
-# -----------------------------
-CLASS_NAMES = ["airplane", "automobile", "bird", "cat", "deer",
-               "dog", "frog", "horse", "ship", "truck"]
+scale_percent = st.sidebar.slider("Scale percent", 10, 300, 100, 5)
 
-# -----------------------------
-# Cache dataset load
-# -----------------------------
-@st.cache_data(show_spinner=False)
-def load_cifar10():
-    (x_train, y_train), (x_test, y_test) = tf.keras.datasets.cifar10.load_data()
-    y_train = y_train.squeeze()
-    y_test = y_test.squeeze()
-    return (x_train, y_train), (x_test, y_test)
+target_w = st.sidebar.slider("Target width", 50, 2000, 640, 10)
+target_h = st.sidebar.slider("Target height", 50, 2000, 480, 10)
 
-# -----------------------------
-# Build model
-# -----------------------------
-def build_cnn(lr: float, dropout_rate: float):
-    model = tf.keras.Sequential([
-        tf.keras.layers.Input(shape=(32, 32, 3)),
+st.sidebar.markdown("---")
+st.sidebar.header("3) Rotate")
+rotate_on = st.sidebar.checkbox("Enable rotate", value=False)
+angle = st.sidebar.slider("Angle (degrees)", -180, 180, 0, 1)
 
-        tf.keras.layers.Conv2D(32, (3, 3), activation="relu", padding="same"),
-        tf.keras.layers.MaxPooling2D((2, 2)),  # 32->16
+st.sidebar.markdown("---")
+st.sidebar.header("4) Annotate")
+annotate_on = st.sidebar.checkbox("Enable annotation", value=False)
+text = st.sidebar.text_input("Text to draw", "Hello OpenCV!")
+text_scale = st.sidebar.slider("Text size", 0.3, 3.0, 1.0, 0.1)
+text_thickness = st.sidebar.slider("Text thickness", 1, 10, 2, 1)
+text_x = st.sidebar.slider("Text X", 0, 2000, 30, 5)
+text_y = st.sidebar.slider("Text Y", 0, 2000, 60, 5)
 
-        tf.keras.layers.Conv2D(64, (3, 3), activation="relu", padding="same"),
-        tf.keras.layers.MaxPooling2D((2, 2)),  # 16->8
+rect_on = st.sidebar.checkbox("Draw rectangle box", value=False)
+rect_x1 = st.sidebar.slider("Rect x1", 0, 2000, 50, 5)
+rect_y1 = st.sidebar.slider("Rect y1", 0, 2000, 50, 5)
+rect_x2 = st.sidebar.slider("Rect x2", 0, 2000, 250, 5)
+rect_y2 = st.sidebar.slider("Rect y2", 0, 2000, 250, 5)
+rect_thickness = st.sidebar.slider("Rect thickness", 1, 15, 3, 1)
 
-        tf.keras.layers.Dropout(dropout_rate),
+st.sidebar.markdown("---")
+st.sidebar.header("5) Canny Edge Detection")
+canny_on = st.sidebar.checkbox("Enable Canny", value=False)
+canny_t1 = st.sidebar.slider("Threshold 1", 0, 500, 100, 5)
+canny_t2 = st.sidebar.slider("Threshold 2", 0, 500, 200, 5)
+canny_blur = st.sidebar.slider("Blur kernel (odd number)", 1, 21, 5, 2)
 
-        tf.keras.layers.Flatten(),
-        tf.keras.layers.Dense(128, activation="relu"),
-        tf.keras.layers.Dropout(dropout_rate),
+st.sidebar.markdown("---")
+st.sidebar.header("6) Face Detection")
+face_on = st.sidebar.checkbox("Enable face detection", value=False)
+face_scaleFactor = st.sidebar.slider("scaleFactor (smaller = more detections, slower)", 1.01, 1.50, 1.10, 0.01)
+face_minNeighbors = st.sidebar.slider("minNeighbors (bigger = stricter)", 1, 15, 5, 1)
+min_face_size = st.sidebar.slider("min face size (pixels)", 20, 300, 40, 5)
 
-        tf.keras.layers.Dense(10, activation="softmax"),
-    ])
-
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
-        loss="sparse_categorical_crossentropy",
-        metrics=["accuracy"],
-    )
-    return model
-
-# -----------------------------
-# Load + preprocess data
-# -----------------------------
-(x_train, y_train), (x_test, y_test) = load_cifar10()
-
-# Normalize to [0,1]
-x_train = x_train.astype("float32") / 255.0
-x_test = x_test.astype("float32") / 255.0
-
-rng = np.random.default_rng(int(seed))
-
-if use_small_subset:
-    train_idx = rng.choice(len(x_train), size=int(subset_train), replace=False)
-    test_idx = rng.choice(len(x_test), size=int(subset_test), replace=False)
-    x_train_s, y_train_s = x_train[train_idx], y_train[train_idx]
-    x_test_s, y_test_s = x_test[test_idx], y_test[test_idx]
-else:
-    x_train_s, y_train_s = x_train, y_train
-    x_test_s, y_test_s = x_test, y_test
-
-st.subheader("1) Data preview")
-c1, c2 = st.columns(2)
-with c1:
-    st.write(f"Train images: **{len(x_train_s)}**")
-    st.write(f"Test images: **{len(x_test_s)}**")
-    st.write(f"Image shape: `{x_train_s[0].shape}` (height, width, channels)")
-with c2:
-    i = int(rng.integers(0, len(x_train_s)))
-    fig = plt.figure(figsize=(3, 3))
-    plt.imshow(x_train_s[i])
-    plt.title(f"Label: {CLASS_NAMES[int(y_train_s[i])]}")
-    plt.axis("off")
-    st.pyplot(fig)
-
-# -----------------------------
-# Session state
-# -----------------------------
-if "model" not in st.session_state:
-    st.session_state.model = None
-if "history" not in st.session_state:
-    st.session_state.history = None
-if "train_logs" not in st.session_state:
-    st.session_state.train_logs = ""
-
-class StreamlitLogCallback(tf.keras.callbacks.Callback):
-    def on_train_begin(self, logs=None):
-        st.session_state.train_logs = ""
-
-    def on_epoch_end(self, epoch, logs=None):
-        logs = logs or {}
-        msg = (
-            f"Epoch {epoch+1}: "
-            f"loss={logs.get('loss', np.nan):.4f}, "
-            f"acc={logs.get('accuracy', np.nan):.4f}, "
-            f"val_loss={logs.get('val_loss', np.nan):.4f}, "
-            f"val_acc={logs.get('val_accuracy', np.nan):.4f}\n"
-        )
-        st.session_state.train_logs += msg
-
-# -----------------------------
-# Train
-# -----------------------------
-st.subheader("2) Train the CNN")
-
-train_col, info_col = st.columns([1, 2])
-
-with train_col:
-    if st.button("🚀 Train / Retrain Model", use_container_width=True):
-        with st.spinner("Training..."):
-            tf.keras.utils.set_random_seed(int(seed))
-            model = build_cnn(float(learning_rate), float(dropout))
-
-            history = model.fit(
-                x_train_s, y_train_s,
-                validation_split=0.2,
-                epochs=int(epochs),
-                batch_size=int(batch_size),
-                verbose=0,
-                callbacks=[StreamlitLogCallback()],
-            )
-
-            st.session_state.model = model
-            st.session_state.history = history.history
-
-with info_col:
-    st.write(
-        "- CIFAR-10 is **harder than MNIST** because images are colorful and more complex.\n"
-        "- A CNN learns **filters** that detect edges/textures/shapes.\n"
-        "- The last layer outputs **10 probabilities** (one per class)."
-    )
-
-if st.session_state.model is not None:
-    with st.expander("Show model summary"):
-        lines = []
-        st.session_state.model.summary(print_fn=lambda x: lines.append(x))
-        st.code("\n".join(lines))
-
-# -----------------------------
-# Logs + plots + evaluation
-# -----------------------------
-if st.session_state.model is not None and st.session_state.history is not None:
-    st.subheader("3) Logs, history, and evaluation")
-
-    log_left, plot_right = st.columns([1, 2])
-
-    with log_left:
-        st.write("📋 Training logs")
-        st.text_area("Logs", st.session_state.train_logs, height=240)
-
-        test_loss, test_acc = st.session_state.model.evaluate(x_test_s, y_test_s, verbose=0)
-        st.metric("Test accuracy", f"{test_acc:.3f}")
-        st.metric("Test loss", f"{test_loss:.3f}")
-
-    with plot_right:
-        hist = st.session_state.history
-
-        fig1 = plt.figure()
-        plt.plot(hist["loss"], label="train loss")
-        plt.plot(hist["val_loss"], label="val loss")
-        plt.xlabel("Epoch")
-        plt.ylabel("Loss")
-        plt.legend()
-        st.pyplot(fig1)
-
-        fig2 = plt.figure()
-        plt.plot(hist["accuracy"], label="train acc")
-        plt.plot(hist["val_accuracy"], label="val acc")
-        plt.xlabel("Epoch")
-        plt.ylabel("Accuracy")
-        plt.legend()
-        st.pyplot(fig2)
-
-# -----------------------------
-# Prediction section
-# -----------------------------
-st.subheader("4) Predict on random test images")
-
-if st.session_state.model is None:
-    st.info("Train the model first to enable predictions.")
+# -------------------------
+# Main
+# -------------------------
+if uploaded is None:
+    st.info("👈 Upload an image from the sidebar to start.")
     st.stop()
 
-if "candidate_indices" not in st.session_state or st.button("🔁 Refresh random images"):
-    st.session_state.candidate_indices = rng.choice(len(x_test_s), size=int(num_random_images), replace=False).tolist()
+# Read original
+orig_bgr = read_image_as_bgr(uploaded)
+if orig_bgr is None:
+    st.error("Could not read the image. Try another file.")
+    st.stop()
 
-candidate_indices = st.session_state.candidate_indices
+img_bgr = orig_bgr.copy()
 
-choice = st.selectbox(
-    "Choose an image from the random set",
-    options=list(range(len(candidate_indices))),
-    format_func=lambda i: f"Option {i+1} (test row #{candidate_indices[i]})"
+# -------------------------
+# Resize
+# -------------------------
+if resize_on:
+    h, w = img_bgr.shape[:2]
+    if resize_mode == "Scale (%)":
+        new_w = int(w * scale_percent / 100)
+        new_h = int(h * scale_percent / 100)
+    else:
+        new_w, new_h = int(target_w), int(target_h)
+
+    # Guard
+    new_w = max(1, new_w)
+    new_h = max(1, new_h)
+
+    img_bgr = cv2.resize(img_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+# -------------------------
+# Rotate
+# -------------------------
+if rotate_on and angle != 0:
+    h, w = img_bgr.shape[:2]
+    center = (w // 2, h // 2)
+    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+    img_bgr = cv2.warpAffine(img_bgr, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+
+# -------------------------
+# Annotate (text + rectangle)
+# -------------------------
+if annotate_on:
+    # Clamp coordinates into image
+    h, w = img_bgr.shape[:2]
+    tx = clamp_int(text_x, 0, w - 1)
+    ty = clamp_int(text_y, 0, h - 1)
+
+    # Text in green
+    cv2.putText(
+        img_bgr,
+        text,
+        (tx, ty),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        float(text_scale),
+        (0, 255, 0),
+        int(text_thickness),
+        lineType=cv2.LINE_AA
+    )
+
+    if rect_on:
+        x1 = clamp_int(min(rect_x1, rect_x2), 0, w - 1)
+        y1 = clamp_int(min(rect_y1, rect_y2), 0, h - 1)
+        x2 = clamp_int(max(rect_x1, rect_x2), 0, w - 1)
+        y2 = clamp_int(max(rect_y1, rect_y2), 0, h - 1)
+
+        # Rectangle in red
+        cv2.rectangle(img_bgr, (x1, y1), (x2, y2), (0, 0, 255), int(rect_thickness))
+
+# -------------------------
+# Face detection
+# -------------------------
+faces = []
+if face_on:
+    # Haar cascade file comes with OpenCV-python
+    cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    face_cascade = cv2.CascadeClassifier(cascade_path)
+
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    faces = face_cascade.detectMultiScale(
+        gray,
+        scaleFactor=float(face_scaleFactor),
+        minNeighbors=int(face_minNeighbors),
+        minSize=(int(min_face_size), int(min_face_size))
+    )
+
+    # Draw face boxes in blue
+    for (x, y, w, h) in faces:
+        cv2.rectangle(img_bgr, (x, y), (x + w, y + h), (255, 0, 0), 2)
+
+# -------------------------
+# Canny (edges)
+# -------------------------
+edges = None
+if canny_on:
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    k = int(canny_blur)
+    if k % 2 == 0:
+        k += 1  # must be odd
+    if k > 1:
+        gray = cv2.GaussianBlur(gray, (k, k), 0)
+
+    edges = cv2.Canny(gray, int(canny_t1), int(canny_t2))
+
+# -------------------------
+# Display results
+# -------------------------
+st.subheader("Results")
+
+colA, colB = st.columns(2)
+
+with colA:
+    st.write("✅ Processed Image")
+    st.image(bgr_to_rgb(img_bgr), use_container_width=True)
+
+    if face_on:
+        st.write(f"👤 Faces detected: **{len(faces)}**")
+
+with colB:
+    st.write("🧩 Original Image")
+    st.image(bgr_to_rgb(orig_bgr), use_container_width=True)
+
+    if edges is not None:
+        st.write("🟦 Canny Edges")
+        st.image(edges, clamp=True, use_container_width=True)
+
+st.caption(
+    "Install requirements: `pip install streamlit opencv-python numpy`  |  Run: `streamlit run app_opencv.py`"
 )
-
-idx = candidate_indices[int(choice)]
-img = x_test_s[idx]
-true_label = int(y_test_s[idx])
-
-probs = st.session_state.model.predict(img[None, ...], verbose=0)[0]
-pred_label = int(np.argmax(probs))
-
-cA, cB = st.columns([1, 1])
-
-with cA:
-    fig = plt.figure(figsize=(4, 4))
-    plt.imshow(img)
-    plt.axis("off")
-    plt.title(f"True: {CLASS_NAMES[true_label]}")
-    st.pyplot(fig)
-
-with cB:
-    st.write("🤖 Prediction")
-    st.success(f"Predicted: **{CLASS_NAMES[pred_label]}**")
-    st.write("Top probabilities:")
-    top = np.argsort(probs)[::-1][:5]
-    top_table = pd.DataFrame({
-        "class": [CLASS_NAMES[i] for i in top],
-        "probability": [float(probs[i]) for i in top]
-    })
-    st.dataframe(top_table, use_container_width=True)
-
-    figp = plt.figure(figsize=(10, 3))
-    plt.bar(CLASS_NAMES, probs)
-    plt.xticks(rotation=30, ha="right")
-    plt.ylim(0, 1)
-    plt.ylabel("Probability")
-    st.pyplot(figp)
-
-st.caption("Tip: Increase epochs or use more training data for better accuracy.")
