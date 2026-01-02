@@ -1,218 +1,334 @@
-# app_opencv.py
-# Streamlit + OpenCV demo app:
-# ✅ Upload image
-# ✅ Resize
-# ✅ Rotate
-# ✅ Annotate (text + rectangle)
-# ✅ Canny edge detection
-# ✅ Face detection (Haar Cascade)
+# app_yolo.py
+# ------------------------------------------------------------
+# YOLOv8 Learning App (Streamlit)
+# ------------------------------------------------------------
+# How to run:
+#   pip install streamlit ultralytics opencv-python pillow numpy pandas
+#   streamlit run app_yolo.py
+#
+# What students learn:
+# - What YOLO does: object detection = boxes + labels + confidence
+# - How confidence threshold changes what appears
+# - How IoU threshold affects duplicate boxes (NMS)
+# - How class filtering works
+# - How to inspect detections as a table + counts
+#
+# Sources (Ultralytics docs):
+# - Python usage and predict mode: https://docs.ultralytics.com/usage/python/ and /modes/predict/
+# - Streamlit inference guide: https://docs.ultralytics.com/guides/streamlit-live-inference/
+# ------------------------------------------------------------
+
+import time
+from typing import List, Optional, Tuple
 
 import streamlit as st
 import numpy as np
+import pandas as pd
+from PIL import Image
 import cv2
 
-st.set_page_config(page_title="OpenCV Playground", layout="wide")
-st.title("🖼️ OpenCV Playground (Resize • Rotate • Annotate • Canny • Face Detect)")
+from ultralytics import YOLO
 
+# ----------------------------
+# Page setup
+# ----------------------------
+st.set_page_config(page_title="Learn YOLOv8 (Ultralytics) - Simple App", layout="wide")
+st.title("🎯 Learn YOLOv8 by Playing (Ultralytics + Streamlit)")
 st.write(
-    "Upload an image and try classic OpenCV operations.\n\n"
-    "**Tip:** Face detection works best on clear front-facing faces."
+    "YOLO = **You Only Look Once**.\n"
+    "It looks at an image and returns **bounding boxes + class names + confidence**.\n"
+    "Use the controls to see how detection changes."
 )
 
-# -------------------------
-# Helpers
-# -------------------------
-def read_image_as_bgr(uploaded_file):
-    """Read uploaded image bytes -> OpenCV BGR image."""
-    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-    bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-    return bgr
+# ----------------------------
+# Sidebar: learning controls
+# ----------------------------
+st.sidebar.header("⚙️ YOLO Settings")
 
-def bgr_to_rgb(bgr):
-    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+MODEL_CHOICES = {
+    "yolov8n (fastest, smallest)": "yolov8n.pt",
+    "yolov8s (small)": "yolov8s.pt",
+    "yolov8m (medium)": "yolov8m.pt",
+    "yolov8l (large)": "yolov8l.pt",
+    "yolov8x (largest, slowest)": "yolov8x.pt",
+}
 
-def clamp_int(x, lo, hi):
-    return int(max(lo, min(hi, x)))
+model_label = st.sidebar.selectbox("Choose a model size", list(MODEL_CHOICES.keys()), index=0)
+weights = MODEL_CHOICES[model_label]
 
-# -------------------------
-# Sidebar controls
-# -------------------------
-st.sidebar.header("1) Upload")
-uploaded = st.sidebar.file_uploader("Upload an image", type=["png", "jpg", "jpeg", "bmp", "webp"])
+conf = st.sidebar.slider("Confidence threshold (0.0–1.0)", 0.0, 1.0, 0.25, 0.01)
+iou = st.sidebar.slider("IoU threshold for NMS (0.0–1.0)", 0.0, 1.0, 0.45, 0.01)
 
 st.sidebar.markdown("---")
-st.sidebar.header("2) Resize")
-resize_on = st.sidebar.checkbox("Enable resize", value=True)
-resize_mode = st.sidebar.selectbox("Resize mode", ["Scale (%)", "Exact (W,H)"], index=0)
+st.sidebar.subheader("🎓 Quick meanings")
+st.sidebar.write(
+    "**Confidence**: how sure YOLO is.\n"
+    "- Higher = fewer boxes, more strict.\n"
+    "- Lower = more boxes, more mistakes.\n\n"
+    "**IoU**: overlap between boxes.\n"
+    "- NMS removes duplicates.\n"
+    "- Higher IoU can keep more overlapping boxes."
+)
 
-scale_percent = st.sidebar.slider("Scale percent", 10, 300, 100, 5)
+# ----------------------------
+# Cache model loading
+# ----------------------------
+@st.cache_resource
+def load_model(weights_path: str) -> YOLO:
+    # Loads YOLO weights once and reuses them (fast for Streamlit).
+    return YOLO(weights_path)
 
-target_w = st.sidebar.slider("Target width", 50, 2000, 640, 10)
-target_h = st.sidebar.slider("Target height", 50, 2000, 480, 10)
+model = load_model(weights)
 
-st.sidebar.markdown("---")
-st.sidebar.header("3) Rotate")
-rotate_on = st.sidebar.checkbox("Enable rotate", value=False)
-angle = st.sidebar.slider("Angle (degrees)", -180, 180, 0, 1)
-
-st.sidebar.markdown("---")
-st.sidebar.header("4) Annotate")
-annotate_on = st.sidebar.checkbox("Enable annotation", value=False)
-text = st.sidebar.text_input("Text to draw", "Hello OpenCV!")
-text_scale = st.sidebar.slider("Text size", 0.3, 3.0, 1.0, 0.1)
-text_thickness = st.sidebar.slider("Text thickness", 1, 10, 2, 1)
-text_x = st.sidebar.slider("Text X", 0, 2000, 30, 5)
-text_y = st.sidebar.slider("Text Y", 0, 2000, 60, 5)
-
-rect_on = st.sidebar.checkbox("Draw rectangle box", value=False)
-rect_x1 = st.sidebar.slider("Rect x1", 0, 2000, 50, 5)
-rect_y1 = st.sidebar.slider("Rect y1", 0, 2000, 50, 5)
-rect_x2 = st.sidebar.slider("Rect x2", 0, 2000, 250, 5)
-rect_y2 = st.sidebar.slider("Rect y2", 0, 2000, 250, 5)
-rect_thickness = st.sidebar.slider("Rect thickness", 1, 15, 3, 1)
-
-st.sidebar.markdown("---")
-st.sidebar.header("5) Canny Edge Detection")
-canny_on = st.sidebar.checkbox("Enable Canny", value=False)
-canny_t1 = st.sidebar.slider("Threshold 1", 0, 500, 100, 5)
-canny_t2 = st.sidebar.slider("Threshold 2", 0, 500, 200, 5)
-canny_blur = st.sidebar.slider("Blur kernel (odd number)", 1, 21, 5, 2)
-
-st.sidebar.markdown("---")
-st.sidebar.header("6) Face Detection")
-face_on = st.sidebar.checkbox("Enable face detection", value=False)
-face_scaleFactor = st.sidebar.slider("scaleFactor (smaller = more detections, slower)", 1.01, 1.50, 1.10, 0.01)
-face_minNeighbors = st.sidebar.slider("minNeighbors (bigger = stricter)", 1, 15, 5, 1)
-min_face_size = st.sidebar.slider("min face size (pixels)", 20, 300, 40, 5)
-
-# -------------------------
-# Main
-# -------------------------
-if uploaded is None:
-    st.info("👈 Upload an image from the sidebar to start.")
-    st.stop()
-
-# Read original
-orig_bgr = read_image_as_bgr(uploaded)
-if orig_bgr is None:
-    st.error("Could not read the image. Try another file.")
-    st.stop()
-
-img_bgr = orig_bgr.copy()
-
-# -------------------------
-# Resize
-# -------------------------
-if resize_on:
-    h, w = img_bgr.shape[:2]
-    if resize_mode == "Scale (%)":
-        new_w = int(w * scale_percent / 100)
-        new_h = int(h * scale_percent / 100)
-    else:
-        new_w, new_h = int(target_w), int(target_h)
-
-    # Guard
-    new_w = max(1, new_w)
-    new_h = max(1, new_h)
-
-    img_bgr = cv2.resize(img_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
-
-# -------------------------
-# Rotate
-# -------------------------
-if rotate_on and angle != 0:
-    h, w = img_bgr.shape[:2]
-    center = (w // 2, h // 2)
-    M = cv2.getRotationMatrix2D(center, angle, 1.0)
-    img_bgr = cv2.warpAffine(img_bgr, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-
-# -------------------------
-# Annotate (text + rectangle)
-# -------------------------
-if annotate_on:
-    # Clamp coordinates into image
-    h, w = img_bgr.shape[:2]
-    tx = clamp_int(text_x, 0, w - 1)
-    ty = clamp_int(text_y, 0, h - 1)
-
-    # Text in green
-    cv2.putText(
-        img_bgr,
-        text,
-        (tx, ty),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        float(text_scale),
-        (0, 255, 0),
-        int(text_thickness),
-        lineType=cv2.LINE_AA
+# ----------------------------
+# Helper: run prediction on an image (numpy RGB)
+# ----------------------------
+def yolo_predict_image(
+    img_rgb: np.ndarray,
+    conf: float,
+    iou: float,
+    classes: Optional[List[int]] = None,
+) -> Tuple[np.ndarray, pd.DataFrame]:
+    """
+    Runs YOLO on a single RGB image and returns:
+    1) annotated image (RGB) with boxes drawn
+    2) dataframe of detections (class, name, conf, x1,y1,x2,y2)
+    """
+    # Ultralytics can accept numpy arrays directly.
+    results = model.predict(
+        source=img_rgb,
+        conf=conf,
+        iou=iou,
+        classes=classes,   # None = all classes
+        verbose=False,
     )
 
-    if rect_on:
-        x1 = clamp_int(min(rect_x1, rect_x2), 0, w - 1)
-        y1 = clamp_int(min(rect_y1, rect_y2), 0, h - 1)
-        x2 = clamp_int(max(rect_x1, rect_x2), 0, w - 1)
-        y2 = clamp_int(max(rect_y1, rect_y2), 0, h - 1)
+    r = results[0]  # one image => first result
+    annotated_bgr = r.plot()  # plot() returns BGR image (OpenCV style)
+    annotated_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
 
-        # Rectangle in red
-        cv2.rectangle(img_bgr, (x1, y1), (x2, y2), (0, 0, 255), int(rect_thickness))
+    det_rows = []
+    if r.boxes is not None and len(r.boxes) > 0:
+        # r.boxes.xyxy (N,4), r.boxes.conf (N,), r.boxes.cls (N,)
+        xyxy = r.boxes.xyxy.cpu().numpy()
+        confs = r.boxes.conf.cpu().numpy()
+        clss = r.boxes.cls.cpu().numpy().astype(int)
 
-# -------------------------
-# Face detection
-# -------------------------
-faces = []
-if face_on:
-    # Haar cascade file comes with OpenCV-python
-    cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-    face_cascade = cv2.CascadeClassifier(cascade_path)
+        names = r.names  # dict: class_id -> class_name
 
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(
-        gray,
-        scaleFactor=float(face_scaleFactor),
-        minNeighbors=int(face_minNeighbors),
-        minSize=(int(min_face_size), int(min_face_size))
+        for (x1, y1, x2, y2), c, k in zip(xyxy, confs, clss):
+            det_rows.append({
+                "class_id": int(k),
+                "class_name": names.get(int(k), str(int(k))),
+                "confidence": float(c),
+                "x1": float(x1),
+                "y1": float(y1),
+                "x2": float(x2),
+                "y2": float(y2),
+            })
+
+    df = pd.DataFrame(det_rows)
+    return annotated_rgb, df
+
+
+def class_picker_ui() -> Optional[List[int]]:
+    """
+    Lets user pick which classes to detect.
+    Returns list of class IDs or None for "all".
+    """
+    names = model.names  # dict class_id -> name
+    all_items = [f"{k}: {v}" for k, v in names.items()]
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🎯 Class filter (optional)")
+    use_filter = st.sidebar.checkbox("Detect only selected classes", value=False)
+
+    if not use_filter:
+        return None
+
+    selected = st.sidebar.multiselect(
+        "Pick classes",
+        options=all_items,
+        default=["0: person"] if "0: person" in all_items else [],
     )
 
-    # Draw face boxes in blue
-    for (x, y, w, h) in faces:
-        cv2.rectangle(img_bgr, (x, y), (x + w, y + h), (255, 0, 0), 2)
+    class_ids = []
+    for item in selected:
+        # item looks like "0: person"
+        cid = int(item.split(":")[0].strip())
+        class_ids.append(cid)
 
-# -------------------------
-# Canny (edges)
-# -------------------------
-edges = None
-if canny_on:
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    k = int(canny_blur)
-    if k % 2 == 0:
-        k += 1  # must be odd
-    if k > 1:
-        gray = cv2.GaussianBlur(gray, (k, k), 0)
+    return class_ids if class_ids else None
 
-    edges = cv2.Canny(gray, int(canny_t1), int(canny_t2))
 
-# -------------------------
-# Display results
-# -------------------------
-st.subheader("Results")
+selected_classes = class_picker_ui()
 
-colA, colB = st.columns(2)
+# ----------------------------
+# Tabs for easy learning flow
+# ----------------------------
+tab_learn, tab_image, tab_camera, tab_video = st.tabs(
+    ["📘 Learn YOLO", "🖼️ Image", "📷 Camera", "🎥 Video"]
+)
 
-with colA:
-    st.write("✅ Processed Image")
-    st.image(bgr_to_rgb(img_bgr), use_container_width=True)
+with tab_learn:
+    st.subheader("What YOLO returns (the important idea)")
+    st.write(
+        "YOLO turns an image into a list of detections. Each detection has:\n"
+        "- **box**: (x1, y1, x2, y2)\n"
+        "- **class**: what it thinks it is (person, car, dog...)\n"
+        "- **confidence**: a number from 0 to 1\n"
+    )
 
-    if face_on:
-        st.write(f"👤 Faces detected: **{len(faces)}**")
+    st.subheader("How to learn fast with this app")
+    st.write(
+        "1) Start with **Image** tab → upload a photo.\n"
+        "2) Move **confidence** slider and observe:\n"
+        "   - low confidence → many boxes (including wrong ones)\n"
+        "   - high confidence → fewer, cleaner boxes\n"
+        "3) Turn on **class filter** in the sidebar (try only 'person').\n"
+        "4) Try **Video** tab to see detection frame-by-frame.\n"
+    )
 
-with colB:
-    st.write("🧩 Original Image")
-    st.image(bgr_to_rgb(orig_bgr), use_container_width=True)
+    st.info(
+        "Tip: Start with **yolov8n** (fast). Try bigger models only if your machine can handle it."
+    )
 
-    if edges is not None:
-        st.write("🟦 Canny Edges")
-        st.image(edges, clamp=True, use_container_width=True)
+with tab_image:
+    st.subheader("🖼️ Image Upload Detection")
+    up = st.file_uploader("Upload an image (jpg/png)", type=["jpg", "jpeg", "png"])
+    if up:
+        pil = Image.open(up).convert("RGB")
+        img_rgb = np.array(pil)
 
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write("Original")
+            st.image(pil, use_container_width=True)
+
+        with st.spinner("Running YOLO..."):
+            annotated_rgb, df = yolo_predict_image(img_rgb, conf=conf, iou=iou, classes=selected_classes)
+
+        with col2:
+            st.write("YOLO Result (boxes + labels)")
+            st.image(annotated_rgb, use_container_width=True)
+
+        st.subheader("Detections table")
+        if df.empty:
+            st.warning("No detections found. Try lowering confidence.")
+        else:
+            st.dataframe(df.sort_values("confidence", ascending=False), use_container_width=True)
+
+            st.subheader("Counts by class")
+            counts = df["class_name"].value_counts().reset_index()
+            counts.columns = ["class_name", "count"]
+            st.bar_chart(counts.set_index("class_name"))
+
+with tab_camera:
+    st.subheader("📷 Camera Photo Detection (easiest for students)")
+    st.write("Click **Take a picture**, then YOLO will detect objects in it.")
+    cam = st.camera_input("Take a picture")
+    if cam:
+        pil = Image.open(cam).convert("RGB")
+        img_rgb = np.array(pil)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write("Your photo")
+            st.image(pil, use_container_width=True)
+
+        with st.spinner("Running YOLO..."):
+            annotated_rgb, df = yolo_predict_image(img_rgb, conf=conf, iou=iou, classes=selected_classes)
+
+        with col2:
+            st.write("YOLO Result")
+            st.image(annotated_rgb, use_container_width=True)
+
+        if not df.empty:
+            st.subheader("Detections")
+            st.dataframe(df.sort_values("confidence", ascending=False), use_container_width=True)
+
+with tab_video:
+    st.subheader("🎥 Video Detection (frame-by-frame)")
+    st.write(
+        "Upload a short video (mp4). The app runs YOLO on frames and shows an annotated preview.\n"
+        "Tip: Use **yolov8n** and a smaller video for speed."
+    )
+
+    vid = st.file_uploader("Upload a video (mp4/mov/avi)", type=["mp4", "mov", "avi"])
+    max_frames = st.slider("Max frames to process (demo)", 30, 600, 120, 10)
+    every_n = st.slider("Process every Nth frame (speed trick)", 1, 10, 2, 1)
+
+    if vid:
+        # Save uploaded video to a temp file
+        tmp_path = "temp_video.mp4"
+        with open(tmp_path, "wb") as f:
+            f.write(vid.read())
+
+        cap = cv2.VideoCapture(tmp_path)
+        if not cap.isOpened():
+            st.error("Could not open video.")
+        else:
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+            st.write(f"Video frames: **{frame_count}** | FPS: **{fps:.2f}**")
+
+            run = st.button("▶️ Run YOLO on video")
+            if run:
+                preview = st.empty()
+                prog = st.progress(0)
+                info = st.empty()
+
+                processed = 0
+                shown = 0
+                t0 = time.time()
+
+                # simple counts accumulator
+                total_counts = {}
+
+                while processed < max_frames:
+                    ok, frame_bgr = cap.read()
+                    if not ok:
+                        break
+
+                    # skip frames to go faster
+                    frame_index = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+                    if frame_index % every_n != 0:
+                        continue
+
+                    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+
+                    annotated_rgb, df = yolo_predict_image(
+                        frame_rgb, conf=conf, iou=iou, classes=selected_classes
+                    )
+
+                    # update running counts
+                    if not df.empty:
+                        for name, cnt in df["class_name"].value_counts().to_dict().items():
+                            total_counts[name] = total_counts.get(name, 0) + int(cnt)
+
+                    preview.image(annotated_rgb, caption=f"Frame {frame_index}", use_container_width=True)
+
+                    processed += 1
+                    shown += 1
+                    prog.progress(min(1.0, processed / max_frames))
+
+                    elapsed = time.time() - t0
+                    info.write(f"Processed frames: **{processed}/{max_frames}** | Elapsed: **{elapsed:.1f}s**")
+
+                cap.release()
+
+                st.success("Done!")
+                if total_counts:
+                    st.subheader("Total detected counts (across processed frames)")
+                    cdf = pd.DataFrame(
+                        [{"class_name": k, "count": v} for k, v in sorted(total_counts.items(), key=lambda x: -x[1])]
+                    )
+                    st.dataframe(cdf, use_container_width=True)
+                    st.bar_chart(cdf.set_index("class_name"))
+
+# Footer tips
+st.markdown("---")
 st.caption(
-    "Install requirements: `pip install streamlit opencv-python numpy`  |  Run: `streamlit run app_opencv.py`"
+    "Learning tip: If the model detects too many wrong boxes, increase **confidence**. "
+    "If you see duplicates, try adjusting **IoU**."
 )
